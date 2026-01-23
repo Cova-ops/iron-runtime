@@ -3,14 +3,14 @@ use std::{
     task::{RawWaker, RawWakerVTable, Waker},
 };
 
-use crate::{executor::SharedQueue, task::Task};
+use crate::{executor::SharedState, task::Task};
 
 static VTABLE: RawWakerVTable =
     RawWakerVTable::new(clone_waker, wake_waker, wake_by_ref_waker, drop_waker);
 
 pub(crate) struct WakerData {
     task: Task,
-    pub(super) queue: Arc<SharedQueue>,
+    pub(super) state: Arc<SharedState>,
 }
 
 unsafe fn wake_waker(ptr: *const ()) {
@@ -19,7 +19,7 @@ unsafe fn wake_waker(ptr: *const ()) {
     let arc = unsafe { Arc::from_raw(ptr as *const WakerData) };
 
     if arc.task.mark_queued() {
-        arc.queue.push(arc.task.clone());
+        arc.state.add_task(arc.task.clone());
     }
 }
 
@@ -29,7 +29,7 @@ unsafe fn wake_by_ref_waker(ptr: *const ()) {
     let arc = unsafe { Arc::from_raw(ptr as *const WakerData) };
 
     if arc.task.mark_queued() {
-        arc.queue.push(arc.task.clone());
+        arc.state.add_task(arc.task.clone());
     }
 
     // Don't drop the Arc; restore the raw pointer ownership.
@@ -54,8 +54,8 @@ unsafe fn clone_waker(ptr: *const ()) -> RawWaker {
     RawWaker::new(ptr, &VTABLE)
 }
 
-pub(crate) fn task_waker(task: Task, queue: Arc<SharedQueue>) -> Waker {
-    let waker_data = Arc::new(WakerData { task, queue });
+pub(crate) fn task_waker(task: Task, state: Arc<SharedState>) -> Waker {
+    let waker_data = Arc::new(WakerData { task, state });
     let ptr = Arc::into_raw(waker_data) as *const ();
     let raw = RawWaker::new(ptr, &VTABLE);
 

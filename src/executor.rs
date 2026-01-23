@@ -1,49 +1,92 @@
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
-    task::Context,
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    task::{Context, Poll},
 };
 
 use crate::{task::Task, waker::task_waker};
 
-pub(crate) struct SharedQueue(Mutex<VecDeque<Task>>);
+struct Inner {
+    queue: VecDeque<Task>,
+    alive: usize,
+}
 
-impl SharedQueue {
-    pub(crate) fn push(&self, future: Task) {
-        self.0.lock().unwrap().push_back(future);
+pub(crate) struct SharedState {
+    inner: Mutex<Inner>,
+    cvar: Condvar,
+}
+
+impl SharedState {
+    pub(crate) fn add_task(&self, future: Task) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.queue.push_back(future);
+        drop(inner);
+
+        self.cvar.notify_one();
     }
 
-    pub(crate) fn pop(&self) -> Option<Task> {
-        self.0.lock().unwrap().pop_front()
+    pub(crate) fn add_alive(&self, add: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.alive += add;
     }
 }
 
 pub(crate) struct Executor {
-    queue: Arc<SharedQueue>,
+    state: Arc<SharedState>,
 }
 
 impl Executor {
     pub(crate) fn new() -> Self {
         Self {
-            queue: Arc::new(SharedQueue(Mutex::new(VecDeque::new()))),
+            state: Arc::new(SharedState {
+                inner: Mutex::new(Inner {
+                    queue: VecDeque::new(),
+                    alive: 0,
+                }),
+                cvar: Condvar::new(),
+            }),
         }
     }
 
-    pub(crate) fn spawn(&self, future: impl Future<Output = ()> + 'static) {
+    pub(crate) fn spawn(&mut self, future: impl Future<Output = ()> + 'static) {
         let task = Task::spawn(future);
 
         if task.mark_queued() {
-            self.queue.push(task);
+            self.state.add_task(task);
+            self.state.add_alive(1);
         }
     }
 
-    pub(crate) fn run(&self) {
-        while let Some(task) = self.queue.pop() {
-            let waker = task_waker(task.clone(), self.queue.clone());
-            let mut cx = Context::from_waker(&waker);
+    pub(crate) fn run(&mut self) {
+        let cvar = &self.state.cvar;
+        let mut guard = self.state.inner.lock().unwrap();
 
-            task.clear_queued();
-            let _ = task.poll(&mut cx);
+        loop {
+            while let Some(task) = guard.queue.pop_front() {
+                task.clear_queued();
+
+                let waker = task_waker(task.clone(), self.state.clone());
+                let mut cx = Context::from_waker(&waker);
+
+                drop(guard);
+                let poll = task.poll(&mut cx);
+                guard = self.state.inner.lock().unwrap();
+
+                if poll == Poll::Ready(()) {
+                    guard.alive -= 1;
+                }
+            }
+
+            if guard.alive == 0 {
+                break;
+            }
+
+            while guard.alive != 0 && guard.queue.is_empty() {
+                guard = cvar.wait(guard).unwrap();
+            }
         }
     }
 }
