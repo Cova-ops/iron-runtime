@@ -63,3 +63,24 @@ pub(crate) fn task_waker(task: Task, state: Arc<SharedState>) -> Waker {
     // uphold the RawWaker contract for clone/wake/wake_by_ref/drop.
     unsafe { Waker::from_raw(raw) }
 }
+
+#[cfg(test)]
+pub(crate) mod test_waker {
+    use std::ptr;
+    use std::task::{RawWaker, RawWakerVTable, Waker};
+
+    unsafe fn do_nothing(_: *const ()) {}
+    unsafe fn clone_waker(_: *const ()) -> RawWaker {
+        RawWaker::new(ptr::null(), &VTABLE_TEST)
+    }
+
+    static VTABLE_TEST: RawWakerVTable =
+        RawWakerVTable::new(clone_waker, do_nothing, do_nothing, do_nothing);
+
+    pub(crate) fn noop_waker() -> Waker {
+        let raw = RawWaker::new(ptr::null(), &VTABLE_TEST);
+
+        // SAFETY: ptr is to null, only for testing purpose
+        unsafe { Waker::from_raw(raw) }
+    }
+}
